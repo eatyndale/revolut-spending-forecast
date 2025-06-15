@@ -1,0 +1,1207 @@
+---
+title: "DAT7304_2423917"
+author: "Amarachi Eche"
+date: "2025-05-05"
+output: html_document
+---
+
+# Load the Required Libraries
+
+```{r Load necessary libraries}
+
+required_packages <- c(
+  "tidyverse",      # Comprehensive data manipulation and visualization tools
+  "lubridate",      # Simplifies working with dates and times
+  "zoo",            # Tools for time series data
+  "forecast",       # Time series forecasting methods
+  "tseries",        # Time series analysis and computational finance
+  "TSstudio",       # Interactive time series analysis and visualization
+  "lmtest",         # Diagnostic tests for linear models
+  "stats",          # Base R statistical functions
+  "urca",           # Unit root and cointegration tests for time series
+  "vars",           # Estimation and analysis of vector autoregressive models
+  "tsDyn",          # Nonlinear time series models (e.g., TAR, SETAR, LSTAR)
+  "randomForest",   # Classification and regression using random forests
+  "Metrics",        # Evaluation metrics for regression and classification models
+  "e1071",          # Misc tools including SVM, naive Bayes, clustering, and more
+  "dplyr",          # Fast, consistent data manipulation grammar
+  "skimr"           # Compact and flexible summary statistics for data frames
+)
+
+
+# Install only packages that are not already installed
+install.packages(setdiff(required_packages, rownames(installed.packages())), dependencies = TRUE)
+
+# Load all required packages into the session
+lapply(required_packages, library, character.only = TRUE)
+
+library(keras)
+
+model <- keras_model_sequential() %>%
+  layer_dense(units = 10, activation = "relu", input_shape = c(5)) %>%
+  layer_dense(units = 1)
+
+summary(model)
+
+# Ensure keras is correctly installed and set up with a TensorFlow backend
+if (!keras::is_keras_available()) {
+  install.packages("keras")  # Redundant but safe fallback
+  library(keras)
+  install_keras()            # Sets up Python environment and TensorFlow
+}
+
+
+```
+
+# Load the dataset
+
+```{r load dataset}
+# Read datasets
+spending <- read.csv("/spending_dataset.csv", stringsAsFactors = FALSE)
+cpi <- read.csv("/Monthly CPI.csv", stringsAsFactors = FALSE)
+unemployment <- read.csv("/unemployment_rate.csv", stringsAsFactors = FALSE)
+
+head(spending)
+head(cpi)
+head(unemployment)
+```
+
+# Datasets Preparation
+
+## Data Wrangling: Unemployment Rate Dataset
+
+```{r data wrangling for unemployment rate}
+unemployment <- unemployment [,1:2] #select only the required columns
+names(unemployment)[c(1,2)] <- c("date","rate") #renaming the columns to "date" and "rate"
+unemployment$date <- sub(".*to\\s+", "", unemployment$date) #selecting the last month as the date
+unemployment$date [20] <- "Sep 2021"
+head(unemployment, 23)
+```
+
+### Filling Missing values
+
+```{r filling required values for unemloyment dataset}
+feb_2020 <- unemployment %>%
+  filter(date == "Feb 2020")
+
+# Create a new row for "Jan 2020" with the same values
+jan_2020 <- feb_2020 %>%
+  mutate(date = "Jan 2020")
+
+# Add "Jan 2025" with values from "Dec 2024"
+# Find the row for "Dec 2024"
+dec_2024 <- unemployment %>%
+  filter(date == "Dec 2024")
+
+# Create a new row for "Jan 2025" with the same values
+jan_2025 <- dec_2024 %>%
+  mutate(date = "Jan 2025")
+
+# Combine all rows: original data + Jan 2020 + Jan 2025
+final_data <- bind_rows(jan_2020, unemployment, jan_2025)
+
+colnames(final_data)
+
+unemployment_new <- final_data
+  head (unemployment_new)
+```
+
+## Data Wrangling: CPI Dataset
+
+```{r Filter for monthly data and standardize Date format in CPI Dataset}
+
+cpi_data_monthly <- cpi %>%
+  filter(grepl("^[0-9]{4} [A-Z]{3}$", Date)) %>%
+  mutate(
+    # Convert "2024 JAN" to "Jan 2024"
+    Date = paste(
+      toupper(substr(Date, 6, 8)),  # Extract month (e.g., "JAN")
+      substr(Date, 1, 4),           # Extract year (e.g., "2024")
+      sep = " "
+    ),
+    Date = format(as.Date(paste0("01 ", Date), format = "%d %b %Y"), "%b %Y")
+  )
+```
+
+#### selecting only the required dates
+
+```{r Filter for data from Jan 2020 to Jan 2025}
+cpi_new <- cpi_data_monthly %>%
+  mutate(
+    Date_temp = as.Date(paste0("01 ", Date), format = "%d %b %Y")
+  ) %>%
+  filter(
+    Date_temp >= as.Date("2020-01-01") & Date_temp <= as.Date("2025-01-01")
+  ) %>%
+  dplyr::select(Date, CPI.Index)
+
+```
+
+## Date Formatting
+
+```{r}
+# Convert dates
+spending$Date <- trimws(spending$Date)  # Remove leading/trailing spaces
+spending$Date <- gsub("\\s+", " ", spending$Date)  # Replace multiple spaces with single space
+spending$Date <- as.Date(paste0(spending$Date, " 01"), format = "%b %Y %d")
+
+cpi_new$Date <- trimws(cpi_new$Date)  # Remove leading/trailing spaces
+cpi_new$Date <- gsub("\\s+", " ", cpi_new$Date)  # Replace multiple spaces with single space
+cpi_new$Date <- as.Date(paste0(cpi_new$Date, " 01"), format = "%b %Y %d")
+
+unemployment_new$date <- trimws(unemployment_new$date)  # Remove leading/trailing spaces
+unemployment_new$date <- gsub("\\s+", " ", unemployment_new$date)  # Replace multiple spaces with single space
+unemployment_new$date <- as.Date(paste0(unemployment_new$date, " 01"), format = "%b %Y %d")
+
+```
+
+# EDA
+
+## Data View and Clean Structure
+
+```{r}
+head(spending)
+head(cpi_new)
+head(unemployment_new)
+```
+
+```{r Viewing the dataset structure}
+skim(spending)
+skim(cpi_new)
+skim(unemployment_new)
+```
+
+```{r Read the index column as a date column}
+str(spending$Date)
+str(cpi_new$Date)
+str(unemployment_new$date)
+```
+
+## date indexing and converting to timeseries
+
+```{r setting the index frequency and creating time series objects}
+spending_ts <- ts(spending$Total, start = c(2020, 1), frequency = 12)
+cpi_ts <- ts(cpi_new$CPI.Index, start = c(2020, 1), frequency = 12)
+unemployment_ts <- ts(unemployment_new$rate, start = c(2020, 1), frequency = 12)
+
+head(spending_ts)
+head(cpi_ts)
+head(unemployment_ts)
+```
+
+## Checking and Visualising Outliers
+
+```{r checking for outliers using box plot}
+boxplot(spending_ts, main = "Spending Outliers")
+outliers <- boxplot.stats(spending_ts)$out
+if (length(outliers) > 0) {
+  spending_ts[spending_ts %in% outliers] <- NA
+  spending_ts <- na.approx(spending_ts)
+}
+
+boxplot(cpi_ts, main = "CPI Outliers")
+outliers <- boxplot.stats(cpi_ts)$out
+if (length(outliers) > 0) {
+  cpi_ts[cpi_ts %in% outliers] <- NA
+  cpi_ts <- na.approx(cpi_ts)
+}
+
+boxplot(unemployment_ts, main = "Unemployment Outliers")
+outliers <- boxplot.stats(unemployment_ts)$out
+if (length(outliers) > 0) {
+  unemployment_ts[unemployment_ts %in% outliers] <- NA
+  unemployment_ts <- na.approx(unemployment_ts)
+}
+```
+
+### Outlier handling
+
+```{r Handling outliers for unemployment ts using winsorisation}
+quantiles <- quantile(unemployment_ts, probs = c(0.05, 0.95), na.rm = TRUE)
+unemployment_ts_clean <- pmin(pmax(unemployment_ts, quantiles[1]), quantiles[2])
+
+#checking for outliers again using boxplot
+boxplot(unemployment_ts, main = "Unemployment Outliers")
+outliers <- boxplot.stats(unemployment_ts)$out
+if (length(outliers) > 0) {
+  unemployment_ts[unemployment_ts %in% outliers] <- NA
+  unemployment_ts <- na.approx(unemployment_ts)
+}
+```
+
+# Time Series Analysis
+
+```{r visualising the time series data}
+plot(spending_ts, main = "Spending Time Series", ylab = "Total Spending", xlab = "Time")
+plot(cpi_ts, main = "CPI Time Series", ylab = "CPI Index", xlab = "Time")
+plot(unemployment_ts, main = "Unemployment Rate", ylab = "Rate", xlab = "Time")
+```
+
+## Data set transformation
+
+### Checking for transformation using Box-Cox
+
+```{r checking if transformation is required using Box-Cox}
+
+lambda_spending <- BoxCox.lambda(spending_ts)
+print(paste0("lambda_spending is ", lambda_spending))
+
+lambda_cpi <- BoxCox.lambda(cpi_ts)
+print(paste0("lambda_cpi is ", lambda_cpi))
+
+lambda_unemployment <- BoxCox.lambda(unemployment_ts)
+lambda_unemployment
+
+```
+
+Spending AND CPI both have stable variance (λ very close to 2) so no transformation needed. unemployment requires transformation
+
+### Applying transformation using Box-Cox
+
+```{r  Applying the transformation}
+
+unemployment_ts_transformed <- BoxCox(unemployment_ts, lambda = -1)
+
+plot(unemployment_ts_transformed, main = "Transformed Unemployment Rate (1/Y)", ylab = "Transformed Rate")
+
+```
+
+```         
+```
+
+## Plotting Dataset
+
+```{r plotting transformed dataset}
+plot(spending_ts, main = "Spending Time Series", ylab = "Total Spending", xlab = "Time")
+plot(cpi_ts, main = "CPI Time Series", ylab = "CPI Index", xlab = "Time")
+plot(unemployment_ts_transformed, main = "Transformed Unemployment Rate (1/Y)", ylab = "Transformed Rate")
+```
+
+## decomposition plot
+
+```{r}
+# Decompose Spending
+decomp_spending <- stl(spending_ts, s.window = "periodic")
+plot(decomp_spending, main = "Spending Decomposition")
+
+# Decompose CPI
+decomp_cpi <- stl(cpi_ts, s.window = "periodic")
+plot(decomp_cpi, main = "CPI Index Decomposition")
+
+# Decompose Unemployment
+decomp_unemp <- stl(unemployment_ts_transformed, s.window = "periodic")
+plot(decomp_unemp, main = "Unemployment Rate Decomposition")
+```
+
+There is noticeable seasonality and Strong positive monotonic trend in the primary dataset
+
+## Stationarity Test
+
+```{r checking for stationarity}
+
+# ADF test for original Spending
+cat("ADF Test for Spending:\n")
+print(adf.test(spending_ts))
+
+# ADF test for original CPI
+cat("\nADF Test for CPI:\n")
+print(adf.test(cpi_ts))
+
+# ADF test for Unemployment (Transformed)
+cat("\nADF Test for Unemployment (Transformed):\n")
+print(adf.test(unemployment_ts_transformed))
+
+```
+
+## Differencing
+
+```{r Combined differencing (first + seasonal) for each series}
+
+# spending
+spending_diff_1 <- diff(diff(spending_ts), lag = 12)
+
+# CPI
+cpi_diff_1 <- diff(diff(cpi_ts), lag = 12)
+
+# Unemployment (after Box-Cox transformation)
+unemp_diff_1 <- diff(diff(unemployment_ts_transformed), lag = 12)
+
+# ADF Test for each differenced series to re-check for seasonality
+cat("ADF Test - Spending (combined diff):\n")
+print(adf.test(spending_diff_1))
+
+cat("\nADF Test - CPI (combined diff):\n")
+print(adf.test(cpi_diff_1))
+
+cat("\nADF Test - Unemployment (transformed + combined diff):\n")
+print(adf.test(unemp_diff_1))
+```
+
+Spending dataset is now stationary. CPI and Unemployment are being differenced again, automatically selecting the best lags for differencing.
+
+```{r differencing both CPI and Unemployment}
+
+# Spending
+spending_diff <- diff(diff(spending_ts), lag = 12)
+summary(ur.df(spending_diff, type = "drift", selectlags = "AIC"))
+
+# CPI
+cpi_diff <- diff(diff(cpi_ts), lag = 12)
+summary(ur.df(cpi_diff, type = "drift", selectlags = "AIC"))
+
+# Unemployment (BoxCox + diff)
+unemp_diff <- diff(diff(BoxCox(unemployment_ts, lambda = -1)), lag = 12)
+summary(ur.df(unemp_diff, type = "drift", selectlags = "AIC"))
+
+
+```
+
+## ACF and PACF plots
+
+```{r}
+# ACF plots
+par(mfrow = c(1, 1))  # Stack plots vertically
+
+acf(spending_diff, main = "ACF: Spending")
+acf(cpi_diff, main = "ACF: CPI Index")
+acf(unemp_diff, main = "ACF: Transformed Unemployment")
+```
+
+```{r}
+# PACF plots
+par(mfrow = c(1, 1))  # Stack plots vertically
+
+pacf(spending_diff, main = "PACF: Spending")
+pacf(cpi_diff, main = "PACF: CPI Index")
+pacf(unemp_diff, main = "PACF: Transformed Unemployment")
+```
+
+## Checking Auto-Correlation
+
+```{r Checking auto correlation using Ljung-Box on differenced series}
+Box.test(spending_diff, lag = 12, type = "Ljung-Box")
+Box.test(cpi_diff, lag = 12, type = "Ljung-Box")
+Box.test(unemp_diff, lag = 12, type = "Ljung-Box")
+
+```
+
+p-value \> 0.05 implies that all the datasets have significant autocorrelation, meaning it's not random and can likely be modeled effectively with a time series model
+
+# Time Series Model Preparation
+
+## Splitting into train and test sets
+
+```{r splitting data into train and test sets}
+
+train_size <- floor(0.8 * length(spending_diff)) # Set training size (80%)
+
+# Create index for the training end point
+train_end <- time(spending_diff)[train_size]
+test_start <- time(spending_diff)[train_size + 1]
+
+# Split spending_diff
+train_ts <- window(spending_diff, end = train_end)
+test_ts  <- window(spending_diff, start = test_start)
+
+# Split exogenous variables
+train_cpi <- window(cpi_diff, end = train_end)
+test_cpi  <- window(cpi_diff, start = test_start)
+
+train_unemp <- window(unemp_diff, end = train_end)
+test_unemp  <- window(unemp_diff, start = test_start)
+```
+
+## Granger-causality to test for dependencies
+
+```{r granger causality for original (level) Time Series dataset}
+
+spending_level <- window(spending_ts, end = train_end)
+cpi_level <- window(cpi_ts, end = train_end)
+unemp_level <- window(unemployment_ts_transformed, end = train_end)
+
+
+# Combine the variables into one data frame
+granger_level <- cbind(spending_level, cpi_level, unemp_level)
+
+# Granger causality test: Does CPI Granger-cause Spending?
+grangertest(spending_level ~ cpi_level, order = 2, data = as.data.frame(granger_level))
+
+# Granger causality test: Does Unemployment Granger-cause Spending?
+grangertest(spending_level ~ unemp_level, order = 2, data = as.data.frame(granger_level))
+```
+
+```{r granger causality for differenced Time Series dataset}
+# Combine the variables into one data frame
+granger_diff <- cbind(spending_gc = train_ts, cpi_gc = train_cpi, unemp_gc = train_unemp)
+
+# Granger causality test: Does CPI Granger-cause Spending?
+grangertest(spending_gc ~ cpi_gc, order = 2, data = as.data.frame(granger_diff))
+
+# Granger causality test: Does Unemployment Granger-cause Spending?
+grangertest(spending_gc ~ unemp_gc, order = 2, data = as.data.frame(granger_diff))
+
+```
+
+Granger causality tests were conducted on both the level (non-differenced) and differenced series to assess whether CPI or Unemployment can predict changes in Spending.
+
+-   At the **level**, **CPI Granger-causes Spending** at the 5% significance level (*p* = 0.0188), indicating a predictive relationship. In contrast, **Unemployment does not Granger-cause Spending** (*p* = 0.7206).
+
+-   However, when using the **stationary (differenced) series**, **neither CPI nor Unemployment Granger-causes Spending**, with *p*-values of 0.4993 and 0.9722 respectively.
+
+These results suggest that the predictive relationship between CPI and Spending exists primarily in the **long-run (level form)**, but is not evident in short-run dynamics after differencing. Unemployment rate, however, is dropped for not meeting an criteria.
+
+```{r Test if CPI and Spending are cointegrated}
+
+eg_test <- ca.po(cbind(spending_ts, cpi_ts), demean = "constant")
+summary(eg_test)
+
+```
+
+The Phillips–Ouliaris cointegration test was conducted to examine the long-run relationship between Spending and CPI. The test returned a statistic of **32.0036**, which lies **above the 10% critical value (27.85)** but **below the 5% critical value (33.71)**.
+
+This result indicates **weak-to-moderate evidence of cointegration** at the **10% significance level**, suggesting that while both series are individually non-stationary, they may share a **long-term equilibrium relationship**.
+
+Given this, a **Vector Error Correction Model (VECM)** may be appropriate if the objective is to capture both **short-term dynamics** and **long-run adjustments**. Alternatively, for short-term forecasting alone, a **SARIMAX model** could be used, though it would not account for the long-run link. To strengthen this conclusion, a **Johansen test** may also be applied for confirmation.
+
+```{r Johansen Test}
+train_size <- floor(0.8 * length(spending_ts))
+train_spending <- window(spending_ts, end = time(spending_ts)[train_size])
+test_spending  <- window(spending_ts, start = time(spending_ts)[train_size + 1])
+
+train_cpi_long <- window(cpi_ts, end = time(spending_ts)[train_size])
+test_cpi_long  <- window(cpi_ts, start = time(spending_ts)[train_size + 1])
+# 1. Combine level (non-stationary) series
+vecm_data <- cbind(spending_vecm = train_spending, cpi_vecm = train_cpi_long)
+
+# 2. Perform Johansen cointegration test
+johansen_test <- ca.jo(vecm_data, type = "trace", ecdet = "const", K = 2)
+summary(johansen_test)
+
+# 3. Convert Johansen result to VECM
+vecm_model <- cajorls(johansen_test, r = 1)  # r = number of cointegrating relationships
+
+# View short-run adjustment dynamics
+summary(vecm_model)
+```
+
+**Johansen's test** confirms one cointegrating relationship between Spending and CPI, indicating a long-run equilibrium, ie. even if they individually wander over time (non-stationary), tend to move together in such a way that their relationship stays stable over the long term.
+
+# Univariate Modelling
+
+## SARIMA
+
+```{r}
+
+# Fit a univariate SARIMA model on spending_ts
+sarima_model <- auto.arima(
+  train_ts,
+  seasonal = TRUE,
+  stepwise = FALSE,
+  approximation = FALSE
+)
+
+# View model summary
+summary(sarima_model)
+
+# Plot residual diagnostics
+checkresiduals(sarima_model)
+
+# Forecast the next 12 periods
+sarima_forecast <- forecast(sarima_model, h = length(test_ts))
+autoplot(sarima_forecast)
+
+```
+
+## Exponential Smoothing (ETS)
+
+```{r use original Time Series dataset to split into train and test dataset}
+train_size <- floor(0.8 * length(spending_ts))
+train_spending <- window(spending_ts, end = time(spending_ts)[train_size])
+test_spending  <- window(spending_ts, start = time(spending_ts)[train_size + 1])
+
+train_cpi_long <- window(cpi_ts, end = time(spending_ts)[train_size])
+test_cpi_long  <- window(cpi_ts, start = time(spending_ts)[train_size + 1])
+```
+
+```{r ETS modeling}
+
+ets_model <- ets(train_spending) # Fit ETS model
+summary(ets_model) # View model summary
+
+ets_forecast <- forecast(ets_model, h = length(test_spending)) # forecast for length of test data
+
+
+autoplot(ets_forecast) 
+```
+
+## Holt Winters
+
+Both the additive and the multiplicative models were fitted to be compared later.
+
+### Additive
+
+```{r Fit Holt-Winters model (using additive seasonality)}
+hw_model_add <- HoltWinters(train_spending, seasonal = "additive")
+
+
+summary(hw_model_add) # View model summary
+hw_forecast_add <- forecast(hw_model_add, h = length(test_spending)) # Forecast for length of test data
+
+autoplot(hw_forecast_add) # Plot forecast
+```
+
+### Multiplicative
+
+```{r Fit Holt-Winters model (using multiplicative seasonality)}
+hw_model_multiple <- HoltWinters(train_spending, seasonal = "multiplicative")
+
+
+summary(hw_model_multiple) # View model summary
+hw_forecast_multiple <- forecast(hw_model_multiple, h = length(test_spending)) # Forecast for length of test data
+
+autoplot(hw_forecast_multiple) # Plot forecast
+```
+
+# Univariate + Exogenous Variable & Multivariate Modelling
+
+## SARIMAX
+
+```{r}
+
+sarimax_model <- auto.arima(
+  train_ts,
+  xreg = as.numeric(train_cpi),  # Ensure CPI is numeric
+  seasonal = TRUE,
+  stepwise = FALSE,
+  approximation = FALSE
+)
+
+
+summary(sarimax_model) # View summary
+
+checkresiduals(sarimax_model) # Check residuals
+
+#Forecast the length of test set
+forecast_sarimax <- forecast(sarimax_model, xreg = as.numeric(test_cpi), h = length(test_ts))
+autoplot(forecast_sarimax)
+```
+
+## Vector AutoRegression
+
+```{r}
+var_data <- cbind(spending_var = train_ts, cpi_var = train_cpi) #Combine the differenced training series
+
+lag_selection <- VARselect(var_data, lag.max = 10, type = "const") #Select optimal lag order (based on AIC)
+best_lag <- lag_selection$selection["AIC(n)"]
+
+var_model <- VAR(var_data, p = best_lag, type = "const") #Fit the VAR model
+
+
+var_forecast <- predict(var_model, n.ahead = length(test_ts))
+
+#Extract forecast for spending
+spending_forecast_var <- var_forecast$fcst$spending[, "fcst"]
+
+# Convert forecast to time series
+spending_forecast_ts <- ts(spending_forecast_var, start = start(test_ts), frequency = frequency(test_ts))
+
+# Plot training data + forecast only
+autoplot(train_ts, series = "Training Data") +
+  autolayer(spending_forecast_ts, series = "VAR Forecast", linetype = "dashed", color = "blue") +
+  ggtitle("VAR Forecast: Training Data and Future Predictions") +
+  ylab("Spending") +
+  xlab("Time") +
+  theme_minimal()
+
+summary(var_model)
+```
+
+## Vector Error Correction Model (VECM)
+
+```{r}
+#Combine level (non-stationary) series
+vecm_data <- cbind(spending_vecm = train_spending, cpi_vecm = train_cpi_long)
+
+# Perform Johansen cointegration test
+johansen_test <- ca.jo(vecm_data, type = "trace", ecdet = "const", K = 2)
+summary(johansen_test)
+
+#Convert Johansen result to VECM
+vecm_model <- cajorls(johansen_test, r = 1)  # r = number of cointegrating relationships
+
+# View short-run adjustment dynamics
+summary(vecm_model)
+
+```
+
+Johansen's test confirms one cointegrating relationship between Spending and CPI, indicating a long-run equilibrium, ie. even if they individually wander over time (non-stationary), tend to move together in such a way that their relationship stays stable over the long term.
+
+```{r}
+# Convert to VAR for forecasting
+vecm_as_var <- vec2var(johansen_test, r = 1)
+
+# Forecast next 12 periods
+vecm_forecast <- predict(vecm_as_var, n.ahead = length(test_spending))
+
+# Extract spending forecast
+vecm_spending_forecast <- vecm_forecast$fcst$spending[, "fcst"]
+
+# Convert to time series for plotting
+vecm_forecast_ts <- ts(vecm_spending_forecast, start = start(test_spending), frequency = frequency(test_spending))
+
+
+
+# Plot training data and forecast only
+autoplot(train_ts, series = "Training Data") +
+  autolayer(vecm_forecast_ts, series = "VECM Forecast", linetype = "dashed", color = "darkgreen") +
+  ggtitle("VECM: Training Data and Forecast") +
+  xlab("Time") +
+  ylab("Spending") +
+  theme_minimal()
+summary (vecm_model)
+```
+
+# Machine Learning Models
+
+```{r Create Lagged Features}
+create_lagged_df <- function(y, x1, x2, lags = 1:3) {
+  df <- data.frame(y = y)
+  
+  for (l in lags) {
+    # Use stats::lag with -l to match dplyr's direction
+    df[[paste0("lag_y_", l)]] <- stats::lag(y, -l)
+    df[[paste0("lag_cpi_", l)]] <- stats::lag(x1, -l)
+    df[[paste0("lag_unemp_", l)]] <- stats::lag(x2, -l)
+  }
+  
+  return(na.omit(df))
+}
+
+```
+
+```{r Feature Engineering for ML Modeling}
+
+ml_df <- create_lagged_df (spending_ts, cpi_ts, unemployment_ts, lags = 1:3)
+
+```
+
+```{r ML Model Train/Test Split}
+
+n <- nrow(ml_df)
+train_rows <- floor(0.8 * n)
+train_ml <- ml_df[1:train_rows, ]
+test_ml  <- ml_df[(train_rows + 1):n, ]
+
+train_start <- start(spending_ts)
+train_freq  <- frequency(spending_ts)
+train_len   <- nrow(train_ml)
+
+# Create training time series
+train_spending_ts <- ts(train_ml$y, start = train_start, frequency = train_freq)
+
+```
+
+## Random Forest Model
+
+```{r fitting the RF Model}
+  rf_model <- randomForest(
+    y ~ ., 
+    data = train_ml,
+    ntree = 500,
+    mtry = 3,
+    importance = TRUE
+  )
+  
+
+rf_preds <- predict(rf_model, newdata = test_ml) #Predict and Evaluate
+
+```
+
+```{r Forecast time series — start where training ended}
+
+forecast_start_time <- time(train_spending_ts)[length(train_spending_ts)] + 1 / train_freq
+rf_forecast_ts <- ts(rf_preds, start = forecast_start_time, frequency = train_freq)
+
+autoplot(train_spending_ts, series = "Training Data") +
+  autolayer(rf_forecast_ts, series = "RF Forecast", linetype = "dashed", color = "blue") +
+  ggtitle("Random Forest: Training Data and Forecast") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+
+```
+
+## SVR
+
+```{r}
+#  Prepare data
+X_train <- as.matrix(train_ml[, -1])
+y_train <- train_ml$y
+
+X_test <- as.matrix(test_ml[, -1])
+y_test <- test_ml$y
+
+# Train the SVR model
+svr_model <- svm(
+  x = X_train,
+  y = y_train,
+  type = "eps-regression",
+  kernel = "radial",
+  cost = 1,
+  epsilon = 0.1
+)
+
+# Predict
+svr_preds <- predict(svr_model, X_test)
+
+
+#Convert prediction to time series
+forecast_start_time <- time(train_spending_ts)[length(train_spending_ts)] + 1 / frequency(spending_ts)
+svr_forecast_ts <- ts(svr_preds, start = forecast_start_time, frequency = frequency(spending_ts))
+
+# Plot (Training + Forecast)
+autoplot(train_spending_ts, series = "Training Data") +
+  autolayer(svr_forecast_ts, series = "SVR Forecast", linetype = "dashed", color = "purple") +
+  ggtitle("SVR: Training Data and Forecast") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+
+```
+
+## LSTM
+
+```{r}
+# Scale the data
+scale_data <- function(df) {
+  scale(df)
+}
+
+train_scaled <- scale_data(train_ml)
+test_scaled  <- scale_data(test_ml)
+
+# Extract dimensions
+timesteps <- 1  # since we're not using sequences, just 1 time point with lags as features
+n_features <- ncol(train_scaled) - 1  # all features excluding target
+
+# Reshape X into 3D: (samples, timesteps, features)
+X_train <- array(as.matrix(train_scaled[, -1]), dim = c(nrow(train_scaled), timesteps, n_features))
+y_train <- train_scaled[, 1]
+
+X_test  <- array(as.matrix(test_scaled[, -1]), dim = c(nrow(test_scaled), timesteps, n_features))
+y_test  <- test_scaled[, 1]
+
+```
+
+```{r}
+model <- keras_model_sequential() %>%
+  layer_lstm(units = 50, input_shape = c(timesteps, n_features)) %>%
+  layer_dense(units = 1)
+
+model %>% compile(
+  loss = "mean_squared_error",
+  optimizer = "adam"
+)
+
+model %>% fit(
+  x = X_train,
+  y = y_train,
+  epochs = 50,
+  batch_size = 8,
+  verbose = 0
+)
+
+```
+
+```{r}
+# Predict on test set
+lstm_preds_scaled <- model %>% predict(X_test)
+
+# Inverse scale the predictions (match test_ml scale)
+y_train_scaled <- scale(train_ml$y)
+mean_y <- attr(y_train_scaled, "scaled:center")
+sd_y   <- attr(y_train_scaled, "scaled:scale")
+
+lstm_preds <- lstm_preds_scaled * sd_y + mean_y
+```
+
+```{r}
+# Build forecast time series
+forecast_start_time <- time(train_spending_ts)[length(train_spending_ts)] + 1 / frequency(spending_ts)
+lstm_forecast_ts <- ts(lstm_preds, start = forecast_start_time, frequency = frequency(spending_ts))
+
+# Plot
+autoplot(train_spending_ts, series = "Training Data") +
+  autolayer(lstm_forecast_ts, series = "LSTM Forecast", linetype = "dashed", color = "darkgreen") +
+  ggtitle("LSTM: Training Data and Forecast") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+# Model Error Evaluation
+
+## SARIMA
+
+```{r}
+
+sarima_forecast <- forecast(sarima_model, h = length(test_ts))
+
+# Extract predicted values
+sarima_preds <- sarima_forecast$mean
+
+# Compare to actual test values
+rmse_sarima <- rmse(test_ts, sarima_preds)
+mae_sarima  <- mae(test_ts, sarima_preds)
+
+cat("SARIMA RMSE: ", rmse_sarima, "\n")
+cat("SARIMA MAE : ", mae_sarima, "\n")
+
+# Plot actual test vs forecast
+autoplot(test_ts, series = "Actual") +
+  autolayer(sarima_preds, series = "SARIMA Forecast", linetype = "dashed", color = "blue") +
+  ggtitle("SARIMA: Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+## ETS
+
+```{r}
+
+ets_preds <- ets_forecast$mean
+
+# Accuracy Metrics
+rmse_ets <- rmse(test_spending, ets_preds)
+mae_ets  <- mae(test_spending, ets_preds)
+
+cat("ETS RMSE: ", rmse_ets, "\n")
+cat("ETS MAE : ", mae_ets, "\n")
+
+# Plot actual vs forecast
+autoplot(test_spending, series = "Actual") +
+  autolayer(ets_preds, series = "ETS Forecast", linetype = "dashed", color = "orange") +
+  ggtitle("ETS: Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+## Holt-Winters (Additive)
+
+```{r}
+hw_add_preds <- hw_forecast_add$mean
+
+# Compute accuracy metrics
+rmse_hw_add <- rmse(test_spending, hw_add_preds)
+mae_hw_add  <- mae(test_spending, hw_add_preds)
+
+cat("Holt-Winters (Additive) RMSE: ", rmse_hw_add, "\n")
+cat("Holt-Winters (Additive) MAE : ", mae_hw_add, "\n")
+
+# Plot forecast vs actual
+autoplot(test_spending, series = "Actual") +
+  autolayer(hw_add_preds, series = "HW Additive Forecast", linetype = "dashed", color = "steelblue") +
+  ggtitle("Holt-Winters (Additive): Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+## Holt-Winters (Multiplicative)
+
+```{r}
+# Extract predicted values
+hw_preds <- hw_forecast_multiple$mean
+
+# Evaluate forecast
+rmse_hw <- rmse(test_spending, hw_preds)
+mae_hw  <- mae(test_spending, hw_preds)
+
+cat("Holt-Winters RMSE: ", rmse_hw, "\n")
+cat("Holt-Winters MAE : ", mae_hw, "\n")
+
+# Plot forecast vs actual
+autoplot(test_spending, series = "Actual") +
+  autolayer(hw_preds, series = "HW Forecast", linetype = "dashed", color = "darkgreen") +
+  ggtitle("Holt-Winters: Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+## SARIMAX
+
+```{r}
+sarimax_preds <- forecast_sarimax$mean
+
+# Evaluate performance
+rmse_sarimax <- rmse(test_ts, sarimax_preds)
+mae_sarimax  <- mae(test_ts, sarimax_preds)
+
+cat("SARIMAX RMSE: ", rmse_sarimax, "\n")
+cat("SARIMAX MAE : ", mae_sarimax, "\n")
+
+# Plot forecast vs actual
+autoplot(test_ts, series = "Actual") +
+  autolayer(sarimax_preds, series = "SARIMAX Forecast", linetype = "dashed", color = "darkorange") +
+  ggtitle("SARIMAX: Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+## VAR
+
+```{r}
+spending_forecast_var <- var_forecast$fcst$spending_var[, "fcst"]
+
+# Convert to time series
+spending_forecast_ts <- ts(spending_forecast_var, start = start(test_ts), frequency = frequency(test_ts))
+
+# Compute RMSE and MAE
+rmse_var <- rmse(test_ts, spending_forecast_ts)
+mae_var  <- mae(test_ts, spending_forecast_ts)
+
+cat("VAR RMSE: ", rmse_var, "\n")
+cat("VAR MAE : ", mae_var, "\n")
+
+# Plot actual vs forecast
+autoplot(test_ts, series = "Actual") +
+  autolayer(spending_forecast_ts, series = "VAR Forecast", linetype = "dashed", color = "navy") +
+  ggtitle("VAR: Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+## VECM
+
+```{r}
+vecm_spending_forecast <- vecm_forecast$fcst$spending_vecm[, "fcst"]
+
+# Convert forecast to time series
+vecm_forecast_ts <- ts(vecm_spending_forecast, start = start(test_spending), frequency = frequency(test_spending))
+
+# Evaluate accuracy
+rmse_vecm <- rmse(test_spending, vecm_forecast_ts)
+mae_vecm  <- mae(test_spending, vecm_forecast_ts)
+
+cat("VECM RMSE: ", rmse_vecm, "\n")
+cat("VECM MAE : ", mae_vecm, "\n")
+
+# Plot forecast vs actual
+autoplot(test_spending, series = "Actual") +
+  autolayer(vecm_forecast_ts, series = "VECM Forecast", linetype = "dashed", color = "forestgreen") +
+  ggtitle("VECM: Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+## Random Forest Model
+
+```{r}
+y_test <- test_ml$y
+
+# Evaluate performance
+rmse_rf <- rmse(y_test, rf_preds)
+mae_rf  <- mae(y_test, rf_preds)
+
+cat("Random Forest RMSE: ", rmse_rf, "\n")
+cat("Random Forest MAE : ", mae_rf, "\n")
+
+# Convert forecast to time series
+forecast_start_time <- time(train_spending_ts)[length(train_spending_ts)] + 1 / frequency(train_spending_ts)
+rf_forecast_ts <- ts(rf_preds, start = forecast_start_time, frequency = frequency(train_spending_ts))
+
+# Convert actual test values to time series
+rf_actual_ts <- ts(y_test, start = start(rf_forecast_ts), frequency = frequency(rf_forecast_ts))
+
+# Plot forecast vs actual
+autoplot(rf_actual_ts, series = "Actual") +
+  autolayer(rf_forecast_ts, series = "Random Forest Forecast", linetype = "dashed", color = "blue") +
+  ggtitle("Random Forest: Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+## SVR
+
+```{r}
+rmse_svr <- rmse(y_test, svr_preds)
+mae_svr  <- mae(y_test, svr_preds)
+
+cat("SVR RMSE: ", rmse_svr, "\n")
+cat("SVR MAE : ", mae_svr, "\n")
+
+# Convert predictions and actuals to time series
+forecast_start_time <- time(train_spending_ts)[length(train_spending_ts)] + 1 / frequency(train_spending_ts)
+
+svr_forecast_ts <- ts(svr_preds, start = forecast_start_time, frequency = frequency(train_spending_ts))
+svr_actual_ts   <- ts(y_test, start = start(svr_forecast_ts), frequency = frequency(svr_forecast_ts))
+
+# Plot actual vs forecast
+autoplot(svr_actual_ts, series = "Actual") +
+  autolayer(svr_forecast_ts, series = "SVR Forecast", linetype = "dashed", color = "purple") +
+  ggtitle("SVR: Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+## LSTM
+
+```{r}
+lstm_actual <- test_ml$y
+
+#  Evaluate performance
+rmse_lstm <- rmse(lstm_actual, lstm_preds)
+mae_lstm  <- mae(lstm_actual, lstm_preds)
+
+cat("LSTM RMSE: ", rmse_lstm, "\n")
+cat("LSTM MAE : ", mae_lstm, "\n")
+
+# Convert actual and forecasted values to time series
+lstm_forecast_ts <- ts(lstm_preds, start = forecast_start_time, frequency = frequency(spending_ts))
+lstm_actual_ts   <- ts(lstm_actual, start = start(lstm_forecast_ts), frequency = frequency(lstm_forecast_ts))
+
+#Plot actual vs forecast
+autoplot(lstm_actual_ts, series = "Actual") +
+  autolayer(lstm_forecast_ts, series = "LSTM Forecast", linetype = "dashed", color = "darkgreen") +
+  ggtitle("LSTM: Forecast vs Actual Test Data") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+```
+
+# Model Error Comparison
+
+```{r Table Output}
+# Assuming all MAE values are already calculated:
+mae_results <- data.frame(
+  Model = c(
+    "SARIMA", "ETS", "HW (Multiplicative)", "HW (Additive)",
+    "SARIMAX", "VAR", "VECM",
+    "Random Forest", "SVR", "LSTM"
+  ),
+  MAE = c(
+    mae_sarima, mae_ets, mae_hw, mae_hw_add,
+    mae_sarimax, mae_var, mae_vecm,
+    mae_rf, mae_svr, mae_lstm
+  )
+)
+
+# View as table
+print(mae_results)
+
+```
+
+```{r Bar Chart Output}
+ggplot(mae_results, aes(x = reorder(Model, MAE), y = MAE, fill = Model)) +
+  geom_bar(stat = "identity", width = 0.7, show.legend = FALSE) +
+  coord_flip() +
+  geom_text(aes(label = round(MAE, 2)), hjust = -0.1, size = 3.5) +
+  labs(
+    title = "MAE Comparison of Forecasting Models",
+    x = "Model",
+    y = "Mean Absolute Error (MAE)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+
+```
+
+# Evaluating Residuals
+
+```{r Residual Evaluation}
+# SARIMA
+checkresiduals(sarima_model)
+
+# SARIMAX (need to extract residuals manually)
+sarimax_resid <- residuals(sarimax_model)
+checkresiduals(sarimax_model)
+
+# ETS
+checkresiduals(ets_model)
+
+# Holt-Winters (Multiplicative)
+checkresiduals(hw_model_multiple)
+
+# Holt-Winters (Additive)
+checkresiduals(hw_model_add)
+
+# VAR
+serial.test(var_model, lags.pt = 12, type = "PT.asym")
+
+# VECM (converted to VAR form)
+serial.test(vecm_as_var, lags.pt = 12, type = "PT.asym")
+
+# Random Forest
+resid_rf <- test_ml$y - rf_preds
+autoplot(ts(resid_rf)) + ggtitle("RF Residuals")
+
+# SVR
+resid_svr <- test_ml$y - svr_preds
+autoplot(ts(resid_svr)) + ggtitle("SVR Residuals")
+
+# LSTM
+resid_lstm <- test_ml$y - lstm_preds
+autoplot(ts(resid_lstm)) + ggtitle("LSTM Residuals")
+
+Box.test(ts(resid_rf), lag = 12, type = "Ljung-Box")
+Box.test(ts(resid_svr), lag = 12, type = "Ljung-Box")
+Box.test(ts(resid_lstm), lag = 12, type = "Ljung-Box")
+
+```
+
+Several models were evaluated for residual autocorrelation using the **Ljung-Box** and **Portmanteau tests.** SARIMA, SARIMAX, ETS (A,N,N), and Holt-Winters (Additive) showed no evidence of residual autocorrelation, indicating well-specified models with white noise residuals. In contrast, Holt-Winters (Multiplicative), VAR, and VECM exhibited significant autocorrelation in their residuals, suggesting model misspecification and unreliable forecasts.
+
+The Portmanteau test was used for VAR and VECM models because they are multivariate, and this test checks for joint autocorrelation across all residuals—something the univariate Ljung-Box test cannot do. While ACF plots offer a visual check, they are subjective and only assess individual series. The Portmanteau test provides a more rigorous and appropriate assessment for multivariate residual behavior.
+
+For machine learning models such as Random Forest, SVR, and LSTM, traditional residual diagnostics are not required because these models are not built on assumptions about time-dependent structure. However, we inspected their residuals visually using ACF plots to ensure no obvious patterns remained. Based on these findings, Holt-Winters (Multiplicative), VAR, and VECM have been dropped from further consideration due to poor residual behavior.
+
+# Final Forecasting
+
+```{r}
+# Simulate future CPI values (12 months ahead starting from Feb 2025)
+cpi_tail <- tail(cpi_ts, 3)
+cpi_slope <- as.numeric(cpi_tail[3] - cpi_tail[2])
+
+cpi_future <- numeric(12)
+cpi_future[1] <- as.numeric(tail(cpi_ts, 1)) + cpi_slope
+
+for (i in 2:12) {
+  cpi_future[i] <- cpi_future[i - 1] + cpi_slope
+}
+
+# Fitting SARIMAX model using only CPI as exogenous regressor
+xreg_cpi <- as.numeric(cpi_ts)
+sarimax_model <- auto.arima(spending_ts, xreg = xreg_cpi, seasonal = TRUE)
+
+# Forecast spending for Feb 2025 – Jan 2026 using future CPI values
+sarimax_forecast <- forecast(sarimax_model, xreg = cpi_future, h = 12)
+sarimax_forecast_ts <- ts(sarimax_forecast$mean, start = c(2025, 2), frequency = 12)
+
+# Plot original time series and forecast
+autoplot(spending_ts, series = "Historical Spending") +
+  autolayer(sarimax_forecast_ts, series = "SARIMAX Forecast (Feb 2025 – Jan 2026)", 
+            linetype = "dashed", color = "blue") +
+  ggtitle("SARIMAX Spending Forecast (Feb 2025 – Jan 2026)") +
+  xlab("Time") + ylab("Spending") +
+  theme_minimal()
+
+# Display forecast values
+future_dates <- seq(as.Date("2025-02-01"), by = "month", length.out = 12)
+
+sarimax_forecast_df <- data.frame(
+  Month = format(future_dates, "%b %Y"),
+  Predicted_Spending = round(sarimax_forecast$mean, 2),
+  CPI = round(cpi_future, 2)
+)
+
+print(sarimax_forecast_df)
+
+```
+
+# Load package
+
+library(knitr)
+
+# Extract code chunks
+
+```{r}
+install.packages("knitr")
+purl("Time_series_Analysis_Revolut.Rmd", output = "extracted_code.R") 
+```
+
+\`\`\`
